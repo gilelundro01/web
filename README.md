@@ -170,6 +170,40 @@ Kalau tidak dibuat, default dari `config.example.php` dipakai.
 - **Timeout PHP**: free tier biasanya membatasi script ~30 detik. Kalau
   mau response panjang, turunkan `max_tokens` di `config.php`.
 
+### Troubleshooting InfinityFree
+
+- **`HTTP 403 (response bukan JSON)` saat chat**:
+  Layer security InfinityFree (anti-DDoS / bot check / mod_security)
+  nge-block POST request sebelum sampai ke PHP. Cek di DevTools
+  (F12 → Network → klik request `chat.php` yang merah → tab
+  Response): kalau body-nya HTML "Forbidden" / browser check, itu
+  konfirmasinya.
+
+  Coba urutan ini:
+  1. Login ke client area iFastNet → cari **"Anti-DDoS"** atau
+     **"Bot Fight Mode"** → nonaktifkan sementara → coba lagi.
+  2. Login ke **VistaPanel** (cPanel-nya InfinityFree) → cari
+     **"Suhosin"** atau **"Security"** → naikan limit / matikan strict.
+  3. Pastikan `.htaccess` di root & `api/` ke-upload (file ini punya
+     directive yang minta hosting jangan kompres response API).
+  4. Kalau langkah 1-3 gak berhasil, coba hosting lain yang lebih
+     ramah PHP: [000webhost.com](https://000webhost.com),
+     [AwardSpace](https://awardspace.com), atau
+     [ProFreeHost](https://profreehost.com). Upload file yang sama,
+     gak perlu ubah kode.
+
+- **`Upstream mengembalikan response kosong`**:
+  Provider seperti ecomagent kadang reset / maintenance ("5 min
+  break to restock"). Tunggu 5 menit & coba lagi.
+
+- **API_KEY belum diisi**:
+  Buka File Manager → `htdocs/api/keys.env` → pastikan `API_KEY=` diisi
+  token asli, bukan placeholder `isi-token-anda-di-sini`.
+
+- **Untuk model `claude-opus-4.6`**:
+  Hanya tersedia di provider OpenAI-compat seperti ecomagent. Anthropic
+  resmi pakai nama berbeda (`claude-opus-4-5` dst.).
+
 ## Mengganti API key / endpoint
 
 Tinggal edit `api/keys.env` di hosting (lewat File Manager) — tidak perlu
