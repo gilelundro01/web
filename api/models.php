@@ -6,21 +6,13 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/lib.php';
+
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 
-$configPath = __DIR__ . '/config.php';
-if (!is_file($configPath)) {
-    echo json_encode([
-        'ok' => false,
-        'error' => 'config.php belum dibuat.',
-        'models' => new stdClass(),
-        'default' => null,
-    ]);
-    exit;
-}
+$config = load_config(__DIR__);
 
-$config = require $configPath;
 echo json_encode([
     'ok'      => true,
     'models'  => $config['allowed_models'] ?? new stdClass(),

@@ -1,6 +1,6 @@
 <?php
 /**
- * Proxy endpoint untuk Anthropic Messages API.
+ * Proxy endpoint untuk Anthropic Messages API (atau API gateway proxy).
  *
  * Frontend POST JSON:
  *   {
@@ -17,6 +17,8 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/lib.php';
+
 header('Content-Type: application/json; charset=utf-8');
 header('X-Content-Type-Options: nosniff');
 header('Cache-Control: no-store');
@@ -28,33 +30,15 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
     exit;
 }
 
-// Load config.
-$configPath = __DIR__ . '/config.php';
-if (!is_file($configPath)) {
+// Load kredensial + config non-secret.
+try {
+    $creds = load_credentials(__DIR__);
+} catch (Throwable $e) {
     http_response_code(500);
-    echo json_encode([
-        'ok' => false,
-        'error' => 'config.php belum dibuat. Salin api/config.example.php menjadi api/config.php lalu isi API key.',
-    ]);
+    echo json_encode(['ok' => false, 'error' => $e->getMessage()]);
     exit;
 }
-
-$config = require $configPath;
-$apiKey = is_array($config) ? (string) ($config['api_key'] ?? '') : '';
-if (
-    !is_array($config)
-    || $apiKey === ''
-    || $apiKey === 'isi-token-anda-di-sini'
-    || str_starts_with($apiKey, 'sk-ant-xxxx')
-) {
-    http_response_code(500);
-    echo json_encode(['ok' => false, 'error' => 'API key belum diisi di api/config.php.']);
-    exit;
-}
-
-// Endpoint & auth scheme.
-$baseUrl    = rtrim((string) ($config['base_url'] ?? 'https://api.anthropic.com'), '/');
-$authScheme = strtolower((string) ($config['auth_header'] ?? 'x-api-key'));
+$config = load_config(__DIR__);
 
 // Parse body.
 $rawBody = file_get_contents('php://input') ?: '';
@@ -89,8 +73,10 @@ if (count($cleanMessages) === 0) {
 }
 
 // Pilih model: default config, kecuali user pilih dari allowed_models.
-$model = $config['default_model'];
-if (isset($body['model']) && is_string($body['model']) && isset($config['allowed_models'][$body['model']])) {
+$allowedModels = is_array($config['allowed_models'] ?? null) ? $config['allowed_models'] : [];
+$defaultModel  = (string) ($config['default_model'] ?? array_key_first($allowedModels) ?? 'claude-sonnet-4-5');
+$model = $defaultModel;
+if (isset($body['model']) && is_string($body['model']) && isset($allowedModels[$body['model']])) {
     $model = $body['model'];
 }
 
@@ -100,22 +86,22 @@ $payload = [
     'messages'   => $cleanMessages,
 ];
 if (!empty($config['system_prompt'])) {
-    $payload['system'] = $config['system_prompt'];
+    $payload['system'] = (string) $config['system_prompt'];
 }
 
-// Build auth header sesuai konfigurasi.
+// Build header sesuai auth_header di keys.env.
 $headers = [
     'Content-Type: application/json',
     'anthropic-version: ' . ($config['anthropic_version'] ?? '2023-06-01'),
 ];
-if ($authScheme === 'bearer') {
-    $headers[] = 'Authorization: Bearer ' . $apiKey;
+if ($creds['auth_header'] === 'bearer') {
+    $headers[] = 'Authorization: Bearer ' . $creds['api_key'];
 } else {
-    $headers[] = 'x-api-key: ' . $apiKey;
+    $headers[] = 'x-api-key: ' . $creds['api_key'];
 }
 
 // Panggil endpoint Messages.
-$ch = curl_init($baseUrl . '/v1/messages');
+$ch = curl_init($creds['base_url'] . '/v1/messages');
 curl_setopt_array($ch, [
     CURLOPT_RETURNTRANSFER => true,
     CURLOPT_POST           => true,
