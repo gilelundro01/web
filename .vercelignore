@@ -1,0 +1,21 @@
+# Exclude PHP backend & related files from Vercel deployments.
+# These are kept in the repo for InfinityFree / shared PHP host users only —
+# on Vercel we use the Node.js handlers in api/chat.js and api/models.js.
+#
+# Rationale: Vercel serves files in api/ either as serverless functions
+# (when supported by language) or as static assets. If api/chat.php is
+# deployed, a POST to /api/chat.php returns HTTP 405 (the static asset
+# only allows GET) and the rewrite to /api/chat is bypassed.
+
+api/*.php
+api/keys.env
+api/keys.env.example
+api/lib.php
+
+# Apache-specific files: only meaningful on shared PHP hosts.
+.htaccess
+api/.htaccess
+
+# Devin scratch / docs that shouldn't ship to production.
+test-plans/
+test-reports/
