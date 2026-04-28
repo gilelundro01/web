@@ -332,10 +332,15 @@
   }
 
   async function callApi(messages, model) {
+    // Use form-encoded with a `data=<json>` field. Many shared hosts
+    // (notably InfinityFree) have mod_security rules that 403 a POST
+    // whose Content-Type is application/json before it reaches PHP;
+    // form-encoded requests slip through. Backend accepts both.
+    const payload = JSON.stringify({ model, messages });
     const res = await fetch('api/chat.php', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'data=' + encodeURIComponent(payload),
     });
     const data = await res.json().catch(() => ({
       ok: false, error: `HTTP ${res.status} (response bukan JSON)`,
