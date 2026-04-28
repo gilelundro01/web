@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
+  <title>Claude Chat</title>
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo-dot"></span>
+      <span>Claude Chat</span>
+    </div>
+    <div class="controls">
+      <label for="model" class="sr-only">Model</label>
+      <select id="model" title="Pilih model"></select>
+      <button id="clear-btn" type="button" title="Mulai chat baru">New chat</button>
+    </div>
+  </header>
+
+  <main id="chat" class="chat" aria-live="polite"></main>
+
+  <form id="composer" class="composer" autocomplete="off">
+    <textarea
+      id="input"
+      rows="1"
+      placeholder="Tulis pesan… (Enter = kirim, Shift+Enter = baris baru)"
+      required
+    ></textarea>
+    <button id="send-btn" type="submit">Kirim</button>
+  </form>
+
+  <div id="status" class="status" role="status"></div>
+
+  <script src="assets/app.js" defer></script>
+</body>
+</html>
