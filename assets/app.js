@@ -331,22 +331,84 @@
     }
   }
 
-  async function callApi(messages, model) {
-    // Use form-encoded with a `data=<json>` field. Many shared hosts
-    // (notably InfinityFree) have mod_security rules that 403 a POST
-    // whose Content-Type is application/json before it reaches PHP;
-    // form-encoded requests slip through. Backend accepts both.
+  /**
+   * Stream chat response via SSE. Calls `onDelta(text)` per chunk and
+   * resolves with `{ reply, model, usage }` when the stream ends.
+   * Throws on error event from server or non-OK HTTP status.
+   *
+   * Body uses form-encoded `data=<json>` so any layer (InfinityFree
+   * mod_security, etc.) that 403s JSON POSTs still passes through.
+   */
+  async function streamApi(messages, model, onDelta) {
     const payload = JSON.stringify({ model, messages });
     const res = await fetch('api/chat.php', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: 'data=' + encodeURIComponent(payload),
     });
-    const data = await res.json().catch(() => ({
-      ok: false, error: `HTTP ${res.status} (response bukan JSON)`,
-    }));
-    if (!data.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    return data;
+
+    // Two response shapes are supported:
+    //   1) text/event-stream (Vercel Node handler) — live streaming
+    //   2) application/json  (PHP handler / error path) — single payload
+    const ct = res.headers.get('content-type') || '';
+    if (ct.startsWith('application/json')) {
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data || !data.ok) {
+        const err = (data && data.error) || `HTTP ${res.status} (response bukan JSON)`;
+        throw new Error(err);
+      }
+      // Non-streaming reply (PHP backend). Fire onDelta once with full text.
+      const full = String(data.reply || '');
+      if (full) onDelta(full, full);
+      return { reply: full, model: data.model || null, usage: data.usage || null };
+    }
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} (response bukan JSON)`);
+    }
+
+    const reader = res.body && res.body.getReader && res.body.getReader();
+    if (!reader) throw new Error('Browser tidak mendukung response streaming.');
+
+    const decoder = new TextDecoder();
+    let buf = '';
+    let reply = '';
+    let modelOut = null;
+    let usage = null;
+    let sawDone = false;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+
+      // Split on \n; SSE events are separated by blank lines (\n\n).
+      let nl;
+      while ((nl = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, nl).replace(/\r$/, '');
+        buf = buf.slice(nl + 1);
+        if (!line || line.startsWith(':')) continue;
+        if (!line.startsWith('data:')) continue;
+        const json = line.slice(5).trim();
+        if (!json) continue;
+        let evt;
+        try { evt = JSON.parse(json); } catch { continue; }
+        if (typeof evt.error === 'string') {
+          throw new Error(evt.error);
+        }
+        if (typeof evt.delta === 'string' && evt.delta) {
+          reply += evt.delta;
+          try { onDelta(evt.delta, reply); } catch { /* ignore renderer errors */ }
+        }
+        if (evt.done) {
+          sawDone = true;
+          if (typeof evt.model === 'string') modelOut = evt.model;
+          if (evt.usage) usage = evt.usage;
+        }
+      }
+    }
+
+    if (!sawDone && !reply) throw new Error('Stream berakhir tanpa response.');
+    return { reply, model: modelOut, usage };
   }
 
   /* ============================================================
@@ -368,16 +430,23 @@
     const $thinking = appendMessage('assistant', '');
     const pill = attachStatusPill($thinking);
 
+    let pillRemoved = false;
+    const onDelta = (_chunk, full) => {
+      if (!pillRemoved) { pill.remove(); pillRemoved = true; }
+      renderMsgContent($thinking, 'assistant', full);
+      scrollToBottom();
+    };
+
     try {
-      const data = await callApi(history, $modelSel.value || undefined);
-      pill.remove();
+      const data = await streamApi(history, $modelSel.value || undefined, onDelta);
+      if (!pillRemoved) pill.remove();
       const reply = data.reply || '(kosong)';
       renderMsgContent($thinking, 'assistant', reply);
       appendActions($thinking, 'assistant');
       history.push({ role: 'assistant', content: reply });
       saveHistory();
     } catch (e) {
-      pill.remove();
+      if (!pillRemoved) pill.remove();
       $thinking.classList.add('error');
       renderMsgContent($thinking, 'assistant', '**Error:** ' + e.message);
     } finally {
@@ -409,16 +478,24 @@
     $send.disabled = true;
     const $thinking = appendMessage('assistant', '');
     const pill = attachStatusPill($thinking);
+
+    let pillRemoved = false;
+    const onDelta = (_chunk, full) => {
+      if (!pillRemoved) { pill.remove(); pillRemoved = true; }
+      renderMsgContent($thinking, 'assistant', full);
+      scrollToBottom();
+    };
+
     try {
-      const data = await callApi(history, $modelSel.value || undefined);
-      pill.remove();
+      const data = await streamApi(history, $modelSel.value || undefined, onDelta);
+      if (!pillRemoved) pill.remove();
       const reply = data.reply || '(kosong)';
       renderMsgContent($thinking, 'assistant', reply);
       appendActions($thinking, 'assistant');
       history.push({ role: 'assistant', content: reply });
       saveHistory();
     } catch (e) {
-      pill.remove();
+      if (!pillRemoved) pill.remove();
       $thinking.classList.add('error');
       renderMsgContent($thinking, 'assistant', '**Error:** ' + e.message);
     } finally {

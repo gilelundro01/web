@@ -1,22 +1,23 @@
-// Vercel serverless function: proxy ke Claude API (Anthropic atau OpenAI-compat).
-// Setara dengan api/chat.php tapi runtime Node.js.
+// Vercel serverless function: live-streaming proxy ke Claude API.
+// Mendukung dual format (anthropic-native /v1/messages atau OpenAI-compat
+// /v1/chat/completions) dan selalu stream Server-Sent Events ke client.
 //
 // Input (POST):
 //   - application/json     : { model?, messages: [{role, content}, ...] }
 //   - application/x-www-form-urlencoded : data=<json string di atas>
 //
-// Output:
-//   sukses: { ok: true,  reply: "...", model: "...", usage?: {...} }
-//   error : { ok: false, error: "pesan error" }
+// Output: SSE stream
+//   data: {"delta":"...kata..."}\n\n     (banyak, satu per chunk)
+//   data: {"done":true,"model":"...","usage":{...}}\n\n   (terakhir)
+//   data: {"error":"pesan"}\n\n           (kalau gagal di tengah jalan)
+//
+// Frontend: assets/app.js membaca stream ini dan update DOM kata-per-kata.
 
 'use strict';
 
 const { loadCredentials, loadConfig, readBody, jsonError } = require('./_lib');
 
 module.exports = async (req, res) => {
-  res.setHeader('Cache-Control', 'no-store');
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-
   if (req.method !== 'POST') {
     return jsonError(res, 405, 'Method not allowed');
   }
@@ -59,109 +60,73 @@ module.exports = async (req, res) => {
   const systemPrompt = String(config.system_prompt || '');
   const maxTokens = Number(config.max_tokens || 1024);
 
+  // SSE response setup. Vercel & most reverse proxies disable buffering
+  // when Content-Type is text/event-stream + X-Accel-Buffering: no.
+  res.statusCode = 200;
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+  function sse(obj) {
+    res.write('data: ' + JSON.stringify(obj) + '\n\n');
+  }
+
+  // Initial comment so client knows headers are flushed.
+  res.write(': stream-start\n\n');
+
   const ac = new AbortController();
+  let aborted = false;
+  req.on('close', () => { aborted = true; ac.abort(); });
   const timer = setTimeout(() => ac.abort(), Number(config.timeout_ms || 60_000));
 
+  let totalText = '';
+  let modelOut = null;
+  let usage = null;
+
   try {
+    let url;
+    let headers;
+    let payload;
+
     if (creds.apiFormat === 'openai') {
-      // OpenAI-compat (ecomagent dll): pakai stream=true, assemble SSE.
-      // Ecomagent kembalikan content:null di non-streaming — wajib stream.
-      const url = creds.baseUrl + '/v1/chat/completions';
+      url = creds.baseUrl + '/v1/chat/completions';
+      headers = {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + creds.apiKey,
+        'Accept': 'text/event-stream',
+      };
       const oaMessages = [];
       if (systemPrompt) oaMessages.push({ role: 'system', content: systemPrompt });
       for (const m of cleanMessages) oaMessages.push(m);
-
-      const upstream = await fetch(url, {
-        method: 'POST',
-        signal: ac.signal,
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + creds.apiKey,
-          'Accept': 'text/event-stream',
-        },
-        body: JSON.stringify({
-          model,
-          messages: oaMessages,
-          max_tokens: maxTokens,
-          stream: true,
-        }),
-      });
-
-      if (!upstream.ok) {
-        const txt = await upstream.text().catch(() => '');
-        let msg = null;
-        try {
-          const j = JSON.parse(txt);
-          msg = j?.error?.message || j?.error || j?.message || null;
-        } catch (_) { /* ignore */ }
-        return jsonError(res, upstream.status, msg || ('HTTP ' + upstream.status));
-      }
-
-      let content = '';
-      let buffer = '';
-      let usage = null;
-      let modelOut = null;
-
-      const decoder = new TextDecoder();
-      const reader = upstream.body?.getReader();
-      if (!reader) {
-        return jsonError(res, 502, 'Upstream tidak mengembalikan body stream.');
-      }
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let nl;
-        while ((nl = buffer.indexOf('\n')) !== -1) {
-          let line = buffer.slice(0, nl);
-          buffer = buffer.slice(nl + 1);
-          line = line.replace(/\r$/, '');
-          if (!line || line.startsWith(':')) continue;
-          if (!line.startsWith('data:')) continue;
-          const payload = line.slice(5).trim();
-          if (!payload || payload === '[DONE]') continue;
-          let evt;
-          try { evt = JSON.parse(payload); } catch (_) { continue; }
-          if (typeof evt?.model === 'string') modelOut = evt.model;
-          if (evt?.usage && typeof evt.usage === 'object') usage = evt.usage;
-          const delta = evt?.choices?.[0]?.delta;
-          if (delta && typeof delta.content === 'string') {
-            content += delta.content;
-          }
-        }
-      }
-
-      if (!content) {
-        return jsonError(res, 502, 'Upstream mengembalikan response kosong.');
-      }
-
-      res.status(200).setHeader('Content-Type', 'application/json; charset=utf-8');
-      return res.send(JSON.stringify({
-        ok: true,
-        reply: content,
-        model: modelOut || model,
-        usage,
-      }));
-    }
-
-    // Anthropic native.
-    const url = creds.baseUrl + '/v1/messages';
-    const headers = {
-      'Content-Type': 'application/json',
-      'anthropic-version': config.anthropic_version || '2023-06-01',
-    };
-    if (creds.authHeader === 'bearer') {
-      headers['Authorization'] = 'Bearer ' + creds.apiKey;
+      payload = {
+        model,
+        messages: oaMessages,
+        max_tokens: maxTokens,
+        stream: true,
+      };
     } else {
-      headers['x-api-key'] = creds.apiKey;
+      // Anthropic-native streaming.
+      url = creds.baseUrl + '/v1/messages';
+      headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'text/event-stream',
+        'anthropic-version': config.anthropic_version || '2023-06-01',
+      };
+      if (creds.authHeader === 'bearer') {
+        headers['Authorization'] = 'Bearer ' + creds.apiKey;
+      } else {
+        headers['x-api-key'] = creds.apiKey;
+      }
+      payload = {
+        model,
+        max_tokens: maxTokens,
+        messages: cleanMessages,
+        stream: true,
+      };
+      if (systemPrompt) payload.system = systemPrompt;
     }
-
-    const payload = {
-      model,
-      max_tokens: maxTokens,
-      messages: cleanMessages,
-    };
-    if (systemPrompt) payload.system = systemPrompt;
 
     const upstream = await fetch(url, {
       method: 'POST',
@@ -169,32 +134,85 @@ module.exports = async (req, res) => {
       headers,
       body: JSON.stringify(payload),
     });
-    const txt = await upstream.text();
-    let data = null;
-    try { data = JSON.parse(txt); } catch (_) { /* ignore */ }
-    if (!data) {
-      return jsonError(res, 502, 'Response API bukan JSON valid.');
-    }
+
     if (!upstream.ok) {
-      const msg = data?.error?.message || (typeof data?.error === 'string' ? data.error : null) || data?.message || ('HTTP ' + upstream.status);
-      return jsonError(res, upstream.status, String(msg));
+      const txt = await upstream.text().catch(() => '');
+      let msg = null;
+      try {
+        const j = JSON.parse(txt);
+        msg = j?.error?.message || j?.error || j?.message || null;
+      } catch (_) { /* ignore */ }
+      sse({ error: msg || ('HTTP ' + upstream.status) });
+      res.end();
+      return;
     }
-    let reply = '';
-    for (const block of (data.content || [])) {
-      if (block?.type === 'text') reply += String(block.text || '');
+
+    const decoder = new TextDecoder();
+    const reader = upstream.body?.getReader();
+    if (!reader) {
+      sse({ error: 'Upstream tidak mengembalikan body stream.' });
+      res.end();
+      return;
     }
-    res.status(200).setHeader('Content-Type', 'application/json; charset=utf-8');
-    return res.send(JSON.stringify({
-      ok: true,
-      reply,
-      model: data.model || model,
-      usage: data.usage || null,
-    }));
+
+    let buffer = '';
+    while (!aborted) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buffer.indexOf('\n')) !== -1) {
+        let line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        line = line.replace(/\r$/, '');
+        if (!line || line.startsWith(':')) continue;
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === '[DONE]') continue;
+        let evt;
+        try { evt = JSON.parse(data); } catch (_) { continue; }
+
+        if (creds.apiFormat === 'openai') {
+          if (typeof evt.model === 'string') modelOut = evt.model;
+          if (evt.usage && typeof evt.usage === 'object') usage = evt.usage;
+          const delta = evt?.choices?.[0]?.delta;
+          if (delta && typeof delta.content === 'string' && delta.content) {
+            totalText += delta.content;
+            sse({ delta: delta.content });
+          }
+        } else {
+          // Anthropic event types: message_start, content_block_start,
+          // content_block_delta, content_block_stop, message_delta, message_stop, ping
+          if (evt.type === 'message_start' && evt.message?.model) {
+            modelOut = evt.message.model;
+            if (evt.message.usage) usage = evt.message.usage;
+          } else if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta') {
+            const t = String(evt.delta.text || '');
+            if (t) {
+              totalText += t;
+              sse({ delta: t });
+            }
+          } else if (evt.type === 'message_delta' && evt.usage) {
+            usage = { ...(usage || {}), ...evt.usage };
+          }
+        }
+      }
+    }
+
+    if (!totalText && !aborted) {
+      sse({ error: 'Upstream mengembalikan response kosong.' });
+    } else if (!aborted) {
+      sse({ done: true, model: modelOut || model, usage });
+    }
+    res.end();
   } catch (e) {
-    if (e?.name === 'AbortError') {
-      return jsonError(res, 504, 'Timeout: API tidak merespon dalam batas waktu.');
+    if (!aborted) {
+      const msg = e?.name === 'AbortError'
+        ? 'Timeout: API tidak merespon dalam batas waktu.'
+        : 'Gagal menghubungi API: ' + (e?.message || String(e));
+      try { sse({ error: msg }); } catch (_) { /* socket may be closed */ }
     }
-    return jsonError(res, 502, 'Gagal menghubungi API: ' + (e?.message || String(e)));
+    try { res.end(); } catch (_) { /* ignore */ }
   } finally {
     clearTimeout(timer);
   }
