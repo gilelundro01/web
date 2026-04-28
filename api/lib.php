@@ -48,15 +48,22 @@ function load_env_file(string $path): array
 }
 
 /**
- * Load kredensial. Mengembalikan ['api_key'=>..., 'base_url'=>..., 'auth_header'=>...]
- * atau melempar RuntimeException kalau belum di-setup.
+ * Hapus suffix `/v1` (atau `/v1/`) dari BASE_URL agar kita yang menambahkan
+ * path lengkap (`/v1/messages` atau `/v1/chat/completions`).
+ */
+function normalize_base_url(string $url): string
+{
+    $url = rtrim($url, '/');
+    if (preg_match('~^(.*)/v1$~', $url, $m)) {
+        return rtrim($m[1], '/');
+    }
+    return $url;
+}
+
+/**
+ * Load kredensial.
  *
- * Sumber (urutan prioritas dari atas):
- *   1. api/keys.env (KEY=VALUE plain text — direkomendasikan)
- *   2. environment variables ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / API_KEY
- *      (kalau hosting kamu mendukung env var)
- *
- * @return array{api_key:string, base_url:string, auth_header:string}
+ * @return array{api_key:string, base_url:string, auth_header:string, api_format:string}
  */
 function load_credentials(string $apiDir): array
 {
@@ -65,7 +72,6 @@ function load_credentials(string $apiDir): array
 
     $env = load_env_file($envPath);
 
-    // Fallback ke environment process kalau ada (lebih aman di hosting yang support).
     $apiKey = $env['API_KEY']
         ?? $env['ANTHROPIC_AUTH_TOKEN']
         ?? getenv('API_KEY')
@@ -76,13 +82,20 @@ function load_credentials(string $apiDir): array
         ?? $env['ANTHROPIC_BASE_URL']
         ?? getenv('BASE_URL')
         ?: (getenv('ANTHROPIC_BASE_URL') ?: 'https://api.anthropic.com');
-    $baseUrl = (string) $baseUrl;
+    $baseUrl = normalize_base_url((string) $baseUrl);
 
-    $authHeader = strtolower((string) (
-        $env['AUTH_HEADER']
-        ?? getenv('AUTH_HEADER')
-        ?: 'x-api-key'
-    ));
+    $apiFormat = strtolower((string) ($env['API_FORMAT'] ?? getenv('API_FORMAT') ?: ''));
+    if ($apiFormat !== 'anthropic' && $apiFormat !== 'openai') {
+        // Auto-deteksi: kalau host bukan api.anthropic.com → kemungkinan proxy openai.
+        $host = parse_url($baseUrl, PHP_URL_HOST) ?: '';
+        $apiFormat = ($host === 'api.anthropic.com') ? 'anthropic' : 'openai';
+    }
+
+    $authHeader = strtolower((string) ($env['AUTH_HEADER'] ?? getenv('AUTH_HEADER') ?: ''));
+    if ($authHeader !== 'bearer' && $authHeader !== 'x-api-key') {
+        // Default sesuai format: openai = bearer, anthropic = x-api-key.
+        $authHeader = ($apiFormat === 'openai') ? 'bearer' : 'x-api-key';
+    }
 
     if (!is_file($envPath) && !is_file($exampleEnv)) {
         throw new RuntimeException(
@@ -102,8 +115,9 @@ function load_credentials(string $apiDir): array
 
     return [
         'api_key'     => $apiKey,
-        'base_url'    => rtrim($baseUrl, '/'),
-        'auth_header' => $authHeader === 'bearer' ? 'bearer' : 'x-api-key',
+        'base_url'    => $baseUrl,
+        'auth_header' => $authHeader,
+        'api_format'  => $apiFormat,
     ];
 }
 

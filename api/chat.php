@@ -1,10 +1,14 @@
 <?php
 /**
- * Proxy endpoint untuk Anthropic Messages API (atau API gateway proxy).
+ * Proxy endpoint untuk Claude API.
+ *
+ * Mendukung 2 format:
+ *   - anthropic : POST /v1/messages,        x-api-key / Bearer
+ *   - openai    : POST /v1/chat/completions, Bearer
  *
  * Frontend POST JSON:
  *   {
- *     "model":    "claude-sonnet-4-5",          // optional
+ *     "model":    "claude-opus-4.6",            // optional
  *     "messages": [{"role":"user","content":"hi"}, ...]
  *   }
  *
@@ -23,14 +27,12 @@ header('Content-Type: application/json; charset=utf-8');
 header('X-Content-Type-Options: nosniff');
 header('Cache-Control: no-store');
 
-// Hanya izinkan POST.
 if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
     http_response_code(405);
     echo json_encode(['ok' => false, 'error' => 'Method not allowed']);
     exit;
 }
 
-// Load kredensial + config non-secret.
 try {
     $creds = load_credentials(__DIR__);
 } catch (Throwable $e) {
@@ -72,36 +74,63 @@ if (count($cleanMessages) === 0) {
     exit;
 }
 
-// Pilih model: default config, kecuali user pilih dari allowed_models.
+// Pilih model.
 $allowedModels = is_array($config['allowed_models'] ?? null) ? $config['allowed_models'] : [];
-$defaultModel  = (string) ($config['default_model'] ?? array_key_first($allowedModels) ?? 'claude-sonnet-4-5');
+$defaultModel  = (string) ($config['default_model'] ?? array_key_first($allowedModels) ?? 'claude-opus-4.6');
 $model = $defaultModel;
 if (isset($body['model']) && is_string($body['model']) && isset($allowedModels[$body['model']])) {
     $model = $body['model'];
 }
 
-$payload = [
-    'model'      => $model,
-    'max_tokens' => (int) ($config['max_tokens'] ?? 1024),
-    'messages'   => $cleanMessages,
-];
-if (!empty($config['system_prompt'])) {
-    $payload['system'] = (string) $config['system_prompt'];
+$systemPrompt = (string) ($config['system_prompt'] ?? '');
+$maxTokens    = (int) ($config['max_tokens'] ?? 1024);
+
+// Build payload + headers sesuai format.
+if ($creds['api_format'] === 'openai') {
+    $url = $creds['base_url'] . '/v1/chat/completions';
+
+    $oaMessages = [];
+    if ($systemPrompt !== '') {
+        $oaMessages[] = ['role' => 'system', 'content' => $systemPrompt];
+    }
+    foreach ($cleanMessages as $m) $oaMessages[] = $m;
+
+    $payload = [
+        'model'      => $model,
+        'messages'   => $oaMessages,
+        'max_tokens' => $maxTokens,
+        'stream'     => false,
+    ];
+
+    $headers = [
+        'Content-Type: application/json',
+        'Authorization: Bearer ' . $creds['api_key'],
+    ];
+} else { // anthropic
+    $url = $creds['base_url'] . '/v1/messages';
+
+    $payload = [
+        'model'      => $model,
+        'max_tokens' => $maxTokens,
+        'messages'   => $cleanMessages,
+    ];
+    if ($systemPrompt !== '') {
+        $payload['system'] = $systemPrompt;
+    }
+
+    $headers = [
+        'Content-Type: application/json',
+        'anthropic-version: ' . ($config['anthropic_version'] ?? '2023-06-01'),
+    ];
+    if ($creds['auth_header'] === 'bearer') {
+        $headers[] = 'Authorization: Bearer ' . $creds['api_key'];
+    } else {
+        $headers[] = 'x-api-key: ' . $creds['api_key'];
+    }
 }
 
-// Build header sesuai auth_header di keys.env.
-$headers = [
-    'Content-Type: application/json',
-    'anthropic-version: ' . ($config['anthropic_version'] ?? '2023-06-01'),
-];
-if ($creds['auth_header'] === 'bearer') {
-    $headers[] = 'Authorization: Bearer ' . $creds['api_key'];
-} else {
-    $headers[] = 'x-api-key: ' . $creds['api_key'];
-}
-
-// Panggil endpoint Messages.
-$ch = curl_init($creds['base_url'] . '/v1/messages');
+// Panggil endpoint.
+$ch = curl_init($url);
 curl_setopt_array($ch, [
     CURLOPT_RETURNTRANSFER => true,
     CURLOPT_POST           => true,
@@ -129,17 +158,41 @@ if (!is_array($data)) {
 }
 
 if ($httpCode < 200 || $httpCode >= 300) {
-    $errMsg = $data['error']['message'] ?? ('HTTP ' . $httpCode);
+    $errMsg = $data['error']['message']
+        ?? (is_string($data['error'] ?? null) ? $data['error'] : null)
+        ?? $data['message']
+        ?? ('HTTP ' . $httpCode);
     http_response_code($httpCode);
-    echo json_encode(['ok' => false, 'error' => $errMsg]);
+    echo json_encode(['ok' => false, 'error' => (string) $errMsg]);
     exit;
 }
 
-// Ekstrak teks dari content blocks.
+// Ekstrak teks reply.
 $reply = '';
-foreach (($data['content'] ?? []) as $block) {
-    if (($block['type'] ?? '') === 'text') {
-        $reply .= $block['text'] ?? '';
+if ($creds['api_format'] === 'openai') {
+    $choice = $data['choices'][0] ?? null;
+    if (is_array($choice)) {
+        $msg = $choice['message'] ?? null;
+        if (is_array($msg)) {
+            // content bisa string atau array of parts (gpt-style multi-part)
+            if (is_string($msg['content'] ?? null)) {
+                $reply = $msg['content'];
+            } elseif (is_array($msg['content'] ?? null)) {
+                foreach ($msg['content'] as $part) {
+                    if (is_array($part) && isset($part['text'])) {
+                        $reply .= (string) $part['text'];
+                    } elseif (is_string($part)) {
+                        $reply .= $part;
+                    }
+                }
+            }
+        }
+    }
+} else { // anthropic
+    foreach (($data['content'] ?? []) as $block) {
+        if (($block['type'] ?? '') === 'text') {
+            $reply .= $block['text'] ?? '';
+        }
     }
 }
 

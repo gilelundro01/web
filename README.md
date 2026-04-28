@@ -65,32 +65,66 @@ php -S 127.0.0.1:8000
 ## Konfigurasi kredensial (`api/keys.env`)
 
 File ini **plain text** dengan format `KEY=value`. Tidak ada PHP syntax,
-tidak ada quote/koma yang bisa salah. Cukup edit dengan editor apa pun:
+tidak ada quote/koma yang bisa salah. Cukup edit dengan editor apa pun.
 
-```env
-# Anthropic resmi
-BASE_URL=https://api.anthropic.com
-AUTH_HEADER=x-api-key
-API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxx
-```
+### Untuk EcomAgent (atau proxy OpenAI-compatible)
 
-Atau kalau pakai proxy/gateway (mis. ecomagent.in, claude-code style):
+Mayoritas proxy Claude (ecomagent.in, claude-code custom endpoint, dll.)
+sebenarnya bukan Anthropic-native — mereka pakai protokol **OpenAI Chat
+Completions**. Setting:
 
 ```env
 BASE_URL=https://api.ecomagent.in
+API_FORMAT=openai
 AUTH_HEADER=bearer
 API_KEY=sk-xxxxxxxxxxxxxxxxxxxx
 ```
 
-**Bedanya cuma `AUTH_HEADER`**: Anthropic resmi pakai header
-`x-api-key: <key>`, mayoritas proxy pakai `Authorization: Bearer <key>`.
-Mapping dari env style provider proxy:
+### Untuk Anthropic resmi
 
-| Env provider proxy            | `keys.env`                  |
-| ----------------------------- | --------------------------- |
-| `ANTHROPIC_BASE_URL=https://…` | `BASE_URL=https://…`        |
-| `ANTHROPIC_AUTH_TOKEN=sk-…`    | `API_KEY=sk-…`              |
-| (selalu Bearer untuk proxy)   | `AUTH_HEADER=bearer`        |
+```env
+BASE_URL=https://api.anthropic.com
+API_FORMAT=anthropic
+AUTH_HEADER=x-api-key
+API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxx
+```
+
+### Apa bedanya?
+
+| | `API_FORMAT=anthropic` | `API_FORMAT=openai` |
+|---|---|---|
+| Endpoint path | `/v1/messages` | `/v1/chat/completions` |
+| Auth | `x-api-key: <key>` | `Authorization: Bearer <key>` |
+| System prompt | field `system` | message dengan `role: system` |
+| Response field | `content[0].text` | `choices[0].message.content` |
+| Model contoh | `claude-sonnet-4-5` | `claude-opus-4.6` |
+
+`API_FORMAT` boleh dikosongkan — kalau host BASE_URL `api.anthropic.com`
+otomatis jadi `anthropic`, selain itu jadi `openai`. Tapi tetap lebih aman
+diset eksplisit.
+
+`BASE_URL` boleh dengan atau tanpa `/v1` di akhir — keduanya OK karena
+script normalisasi otomatis.
+
+### Mapping dari env style claude-code / ecomagent
+
+Provider seperti ecomagent biasanya kasih config:
+
+```json
+{
+  "ANTHROPIC_BASE_URL":   "https://api.ecomagent.in/",
+  "ANTHROPIC_AUTH_TOKEN": "sk-..."
+}
+```
+
+Petakan ke `keys.env`:
+
+| Env provider                     | `keys.env`             |
+| -------------------------------- | ---------------------- |
+| `ANTHROPIC_BASE_URL=https://…`   | `BASE_URL=https://…`   |
+| `ANTHROPIC_AUTH_TOKEN=sk-…`      | `API_KEY=sk-…`         |
+| (proxy = OpenAI-compat)          | `API_FORMAT=openai`    |
+| (selalu Bearer untuk proxy)      | `AUTH_HEADER=bearer`   |
 
 ## Konfigurasi non-secret (`api/config.php`, opsional)
 
