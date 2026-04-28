@@ -1,0 +1,52 @@
+# =============================================================
+# Konfigurasi khusus folder /api/
+# =============================================================
+# - Lindungi file rahasia.
+# - Jangan biarkan mod_security / browser-check ngeblok POST JSON.
+#
+# Catatan InfinityFree: kalau POST dari frontend balikin HTTP 403
+# dengan body HTML (bukan JSON), kemungkinan layer security
+# (Cloudflare-like browser check / anti-DDoS / mod_security)
+# yang nge-block. Solusi yang biasanya bekerja:
+#   1. Login ke control panel iFastNet → Security/Account →
+#      disable "Anti-DDoS" / "Bot fight" sementara.
+#   2. Atau: pindah ke hosting lain yang lebih ramah
+#      (000webhost, AwardSpace, ProFreeHost, dll).
+# =============================================================
+
+# Block file kredensial.
+<FilesMatch "(^keys\.env|^keys\.env\.example|^config\.php|^config\.example\.php|^lib\.php)$">
+  # lib.php & config*.php boleh di-include dari chat.php tapi
+  # tidak boleh diakses langsung lewat browser.
+  <IfModule mod_authz_core.c>
+    Require all denied
+  </IfModule>
+  <IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+  </IfModule>
+</FilesMatch>
+
+# Tapi keys.env ABSOLUTE block (jangan sampai bocor):
+<Files "keys.env">
+  <IfModule mod_authz_core.c>
+    Require all denied
+  </IfModule>
+  <IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+  </IfModule>
+</Files>
+
+# Force JSON content-type kalau response error tidak ke-set.
+AddType application/json .json
+
+# Hindari kompresi yang bisa rusak respons proxy panjang.
+<IfModule mod_deflate.c>
+  SetEnv no-gzip 1
+</IfModule>
+
+# Pastikan PHP-nya jalan (default sebenarnya, tapi explicit better).
+<IfModule mod_mime.c>
+  AddType application/x-httpd-php .php
+</IfModule>

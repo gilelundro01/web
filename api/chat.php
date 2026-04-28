@@ -4,7 +4,12 @@
  *
  * Mendukung 2 format:
  *   - anthropic : POST /v1/messages,        x-api-key / Bearer
- *   - openai    : POST /v1/chat/completions, Bearer
+ *   - openai    : POST /v1/chat/completions, Bearer  (DENGAN streaming)
+ *
+ * Catatan: untuk openai mode, kita selalu pakai stream=true ke upstream
+ * lalu assemble chunks-nya server-side. Ini diperlukan karena beberapa
+ * proxy (mis. ecomagent.in) bug-nya: non-streaming response selalu
+ * `content: null`. Frontend tetap dapat 1 JSON response final.
  *
  * Frontend POST JSON:
  *   {
@@ -85,8 +90,10 @@ if (isset($body['model']) && is_string($body['model']) && isset($allowedModels[$
 $systemPrompt = (string) ($config['system_prompt'] ?? '');
 $maxTokens    = (int) ($config['max_tokens'] ?? 1024);
 
-// Build payload + headers sesuai format.
 if ($creds['api_format'] === 'openai') {
+    /* ============================================================
+     * OpenAI-compat (ecomagent dll.) — pakai streaming, assemble.
+     * ============================================================ */
     $url = $creds['base_url'] . '/v1/chat/completions';
 
     $oaMessages = [];
@@ -99,37 +106,130 @@ if ($creds['api_format'] === 'openai') {
         'model'      => $model,
         'messages'   => $oaMessages,
         'max_tokens' => $maxTokens,
-        'stream'     => false,
+        'stream'     => true,
     ];
 
     $headers = [
         'Content-Type: application/json',
         'Authorization: Bearer ' . $creds['api_key'],
+        'Accept: text/event-stream',
     ];
-} else { // anthropic
-    $url = $creds['base_url'] . '/v1/messages';
 
-    $payload = [
-        'model'      => $model,
-        'max_tokens' => $maxTokens,
-        'messages'   => $cleanMessages,
+    // State akumulasi chunks (mutated dari WRITEFUNCTION callback).
+    $state = [
+        'content'  => '',
+        'buffer'   => '',
+        'usage'    => null,
+        'modelOut' => null,
     ];
-    if ($systemPrompt !== '') {
-        $payload['system'] = $systemPrompt;
+
+    $writeFn = function ($_ch, $chunk) use (&$state) {
+        $state['buffer'] .= $chunk;
+        // Parse line-by-line; SSE event boundary biasanya \n\n, tapi
+        // kita parse data: line satu-per-satu juga aman.
+        while (($nl = strpos($state['buffer'], "\n")) !== false) {
+            $line = substr($state['buffer'], 0, $nl);
+            $state['buffer'] = substr($state['buffer'], $nl + 1);
+            $line = rtrim($line, "\r");
+
+            if ($line === '' || strncmp($line, ':', 1) === 0) continue;
+            if (strncmp($line, 'data:', 5) !== 0) continue;
+
+            $payload = trim(substr($line, 5));
+            if ($payload === '' || $payload === '[DONE]') continue;
+
+            $evt = json_decode($payload, true);
+            if (!is_array($evt)) continue;
+
+            if (isset($evt['model']) && is_string($evt['model'])) {
+                $state['modelOut'] = $evt['model'];
+            }
+            if (isset($evt['usage']) && is_array($evt['usage'])) {
+                $state['usage'] = $evt['usage'];
+            }
+            $delta = $evt['choices'][0]['delta'] ?? null;
+            if (is_array($delta)) {
+                if (isset($delta['content']) && is_string($delta['content'])) {
+                    $state['content'] .= $delta['content'];
+                }
+            }
+        }
+        return strlen($chunk);
+    };
+
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_POST           => true,
+        CURLOPT_TIMEOUT        => (int) ($config['timeout'] ?? 60),
+        CURLOPT_HTTPHEADER     => $headers,
+        CURLOPT_POSTFIELDS     => json_encode($payload, JSON_UNESCAPED_UNICODE),
+        CURLOPT_WRITEFUNCTION  => $writeFn,
+    ]);
+
+    $ok       = curl_exec($ch);
+    $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlErr  = curl_error($ch);
+    curl_close($ch);
+
+    if ($ok === false) {
+        http_response_code(502);
+        echo json_encode(['ok' => false, 'error' => 'Gagal menghubungi API: ' . $curlErr]);
+        exit;
     }
 
-    $headers = [
-        'Content-Type: application/json',
-        'anthropic-version: ' . ($config['anthropic_version'] ?? '2023-06-01'),
-    ];
-    if ($creds['auth_header'] === 'bearer') {
-        $headers[] = 'Authorization: Bearer ' . $creds['api_key'];
-    } else {
-        $headers[] = 'x-api-key: ' . $creds['api_key'];
+    if ($httpCode < 200 || $httpCode >= 300) {
+        // Coba parse buffer kalau upstream balas JSON error.
+        $maybe = json_decode(trim($state['buffer']), true);
+        $msg = is_array($maybe) ? ($maybe['error']['message'] ?? $maybe['error'] ?? $maybe['message'] ?? null) : null;
+        http_response_code($httpCode);
+        echo json_encode(['ok' => false, 'error' => is_string($msg) && $msg !== '' ? $msg : ('HTTP ' . $httpCode)]);
+        exit;
     }
+
+    if ($state['content'] === '') {
+        // Kalau benar2 kosong, kirim error supaya UI tahu (jangan tampilkan blank).
+        http_response_code(502);
+        echo json_encode([
+            'ok'    => false,
+            'error' => 'Upstream mengembalikan response kosong.',
+        ]);
+        exit;
+    }
+
+    echo json_encode([
+        'ok'    => true,
+        'reply' => $state['content'],
+        'model' => $state['modelOut'] ?? $model,
+        'usage' => $state['usage'],
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
 }
 
-// Panggil endpoint.
+/* ============================================================
+ * Anthropic native (api.anthropic.com).
+ * ============================================================ */
+
+$url = $creds['base_url'] . '/v1/messages';
+
+$payload = [
+    'model'      => $model,
+    'max_tokens' => $maxTokens,
+    'messages'   => $cleanMessages,
+];
+if ($systemPrompt !== '') {
+    $payload['system'] = $systemPrompt;
+}
+
+$headers = [
+    'Content-Type: application/json',
+    'anthropic-version: ' . ($config['anthropic_version'] ?? '2023-06-01'),
+];
+if ($creds['auth_header'] === 'bearer') {
+    $headers[] = 'Authorization: Bearer ' . $creds['api_key'];
+} else {
+    $headers[] = 'x-api-key: ' . $creds['api_key'];
+}
+
 $ch = curl_init($url);
 curl_setopt_array($ch, [
     CURLOPT_RETURNTRANSFER => true,
@@ -167,32 +267,10 @@ if ($httpCode < 200 || $httpCode >= 300) {
     exit;
 }
 
-// Ekstrak teks reply.
 $reply = '';
-if ($creds['api_format'] === 'openai') {
-    $choice = $data['choices'][0] ?? null;
-    if (is_array($choice)) {
-        $msg = $choice['message'] ?? null;
-        if (is_array($msg)) {
-            // content bisa string atau array of parts (gpt-style multi-part)
-            if (is_string($msg['content'] ?? null)) {
-                $reply = $msg['content'];
-            } elseif (is_array($msg['content'] ?? null)) {
-                foreach ($msg['content'] as $part) {
-                    if (is_array($part) && isset($part['text'])) {
-                        $reply .= (string) $part['text'];
-                    } elseif (is_string($part)) {
-                        $reply .= $part;
-                    }
-                }
-            }
-        }
-    }
-} else { // anthropic
-    foreach (($data['content'] ?? []) as $block) {
-        if (($block['type'] ?? '') === 'text') {
-            $reply .= $block['text'] ?? '';
-        }
+foreach (($data['content'] ?? []) as $block) {
+    if (($block['type'] ?? '') === 'text') {
+        $reply .= $block['text'] ?? '';
     }
 }
 

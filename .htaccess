@@ -1,0 +1,25 @@
+# =============================================================
+# Konfigurasi Apache untuk InfinityFree (atau hosting PHP lain)
+# =============================================================
+
+# Pastikan rewrite enabled + jangan paksa redirect untuk POST.
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+</IfModule>
+
+# Default index.
+DirectoryIndex index.html index.php
+
+# UTF-8.
+AddDefaultCharset UTF-8
+
+# Lindungi file kredensial dari akses publik (paranoid; .gitignore juga handle ini).
+<FilesMatch "(^\.|\.env$|^keys\.env|^config\.php$)">
+  Require all denied
+</FilesMatch>
+
+# Some shared hosts (InfinityFree) override Apache's default and force gzip
+# on every response, which can break proxy streaming. Disable here.
+<IfModule mod_deflate.c>
+  SetEnvIfNoCase Request_URI "^/api/" no-gzip dont-vary
+</IfModule>
