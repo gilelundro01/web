@@ -40,11 +40,21 @@ if (!is_file($configPath)) {
 }
 
 $config = require $configPath;
-if (!is_array($config) || empty($config['api_key']) || str_starts_with((string) $config['api_key'], 'sk-ant-xxxx')) {
+$apiKey = is_array($config) ? (string) ($config['api_key'] ?? '') : '';
+if (
+    !is_array($config)
+    || $apiKey === ''
+    || $apiKey === 'isi-token-anda-di-sini'
+    || str_starts_with($apiKey, 'sk-ant-xxxx')
+) {
     http_response_code(500);
     echo json_encode(['ok' => false, 'error' => 'API key belum diisi di api/config.php.']);
     exit;
 }
+
+// Endpoint & auth scheme.
+$baseUrl    = rtrim((string) ($config['base_url'] ?? 'https://api.anthropic.com'), '/');
+$authScheme = strtolower((string) ($config['auth_header'] ?? 'x-api-key'));
 
 // Parse body.
 $rawBody = file_get_contents('php://input') ?: '';
@@ -93,17 +103,24 @@ if (!empty($config['system_prompt'])) {
     $payload['system'] = $config['system_prompt'];
 }
 
-// Panggil Anthropic.
-$ch = curl_init('https://api.anthropic.com/v1/messages');
+// Build auth header sesuai konfigurasi.
+$headers = [
+    'Content-Type: application/json',
+    'anthropic-version: ' . ($config['anthropic_version'] ?? '2023-06-01'),
+];
+if ($authScheme === 'bearer') {
+    $headers[] = 'Authorization: Bearer ' . $apiKey;
+} else {
+    $headers[] = 'x-api-key: ' . $apiKey;
+}
+
+// Panggil endpoint Messages.
+$ch = curl_init($baseUrl . '/v1/messages');
 curl_setopt_array($ch, [
     CURLOPT_RETURNTRANSFER => true,
     CURLOPT_POST           => true,
     CURLOPT_TIMEOUT        => (int) ($config['timeout'] ?? 60),
-    CURLOPT_HTTPHEADER     => [
-        'Content-Type: application/json',
-        'x-api-key: ' . $config['api_key'],
-        'anthropic-version: ' . ($config['anthropic_version'] ?? '2023-06-01'),
-    ],
+    CURLOPT_HTTPHEADER     => $headers,
     CURLOPT_POSTFIELDS     => json_encode($payload, JSON_UNESCAPED_UNICODE),
 ]);
 
@@ -114,14 +131,14 @@ curl_close($ch);
 
 if ($response === false) {
     http_response_code(502);
-    echo json_encode(['ok' => false, 'error' => 'Gagal menghubungi Anthropic: ' . $curlErr]);
+    echo json_encode(['ok' => false, 'error' => 'Gagal menghubungi API: ' . $curlErr]);
     exit;
 }
 
 $data = json_decode((string) $response, true);
 if (!is_array($data)) {
     http_response_code(502);
-    echo json_encode(['ok' => false, 'error' => 'Response Anthropic bukan JSON valid.']);
+    echo json_encode(['ok' => false, 'error' => 'Response API bukan JSON valid.']);
     exit;
 }
 

@@ -39,14 +39,43 @@ Butuh PHP 8+ dengan ekstensi `curl`.
 ```bash
 # 1. Salin config & isi API key
 cp api/config.example.php api/config.php
-# edit api/config.php → isi 'api_key' dengan key dari
-# https://console.anthropic.com/settings/keys
+# edit api/config.php → isi 'api_key' dengan token milikmu
 
 # 2. Jalankan dev server
 php -S 127.0.0.1:8000
 
 # 3. Buka http://127.0.0.1:8000
 ```
+
+## Sumber API: Anthropic resmi vs proxy/gateway
+
+Web ini bisa pakai dua jenis endpoint, tinggal ganti 2 baris di
+`api/config.php`:
+
+### A. Anthropic resmi (default)
+```php
+'base_url'    => 'https://api.anthropic.com',
+'auth_header' => 'x-api-key',
+'api_key'     => 'sk-ant-xxxxxxxxxxxxxxxxxxxx',
+```
+Key didapat dari <https://console.anthropic.com/settings/keys>.
+
+### B. Proxy / gateway (mis. ecomagent.in, claude-code style)
+Provider seperti ini biasanya ngasih env config:
+```json
+{
+  "ANTHROPIC_BASE_URL":   "https://api.example-proxy.com",
+  "ANTHROPIC_AUTH_TOKEN": "sk-..."
+}
+```
+Petakan ke `config.php` jadi:
+```php
+'base_url'    => 'https://api.example-proxy.com',  // dari ANTHROPIC_BASE_URL
+'auth_header' => 'bearer',                          // proxy = pakai Bearer
+'api_key'     => 'sk-...',                          // dari ANTHROPIC_AUTH_TOKEN
+```
+Bedanya cuma di `auth_header`: Anthropic resmi pakai `x-api-key`,
+sementara mayoritas proxy pakai `Authorization: Bearer <token>`.
 
 ## Deploy ke InfinityFree
 
