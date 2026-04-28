@@ -47,12 +47,23 @@ try {
 }
 $config = load_config(__DIR__);
 
-// Parse body.
-$rawBody = file_get_contents('php://input') ?: '';
-$body = json_decode($rawBody, true);
+// Parse body — accept BOTH application/json AND form-encoded `data=<json>`.
+// Form-encoded is the InfinityFree-friendly path: shared-host mod_security
+// rules often flag JSON bodies as suspicious and respond with 403 before
+// reaching PHP. Form-encoded request slips through.
+$body = null;
+if (isset($_POST['data']) && is_string($_POST['data'])) {
+    $body = json_decode($_POST['data'], true);
+}
+if (!is_array($body)) {
+    $rawBody = file_get_contents('php://input') ?: '';
+    if ($rawBody !== '') {
+        $body = json_decode($rawBody, true);
+    }
+}
 if (!is_array($body)) {
     http_response_code(400);
-    echo json_encode(['ok' => false, 'error' => 'Body harus JSON.']);
+    echo json_encode(['ok' => false, 'error' => 'Body harus JSON (atau form-encoded data=<json>).']);
     exit;
 }
 
