@@ -1,0 +1,20 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    { "source": "/api/chat.php", "destination": "/api/chat" },
+    { "source": "/api/models.php", "destination": "/api/models" }
+  ],
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store" },
+        { "key": "X-Content-Type-Options", "value": "nosniff" }
+      ]
+    }
+  ],
+  "functions": {
+    "api/chat.js":   { "maxDuration": 60 },
+    "api/models.js": { "maxDuration": 10 }
+  }
+}

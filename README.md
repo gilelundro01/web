@@ -1,9 +1,14 @@
 # Claude Chat — Web UI ala Devin
 
-Web chat dengan tampilan ala Devin yang berbicara dengan Claude lewat backend
-PHP. Dirancang khusus agar bisa di-host di **InfinityFree** (atau hosting PHP
-gratis lain) — hanya butuh PHP 7.4+ dengan ekstensi `curl`. **Tidak butuh**
-Node.js, tidak butuh database.
+Web chat dengan tampilan ala Devin yang berbicara dengan Claude. Repo ini
+mendukung **dua mode deploy** sekaligus dengan kode yang sama:
+
+- **Vercel** (rekomendasi, gratis, fast). Backend Node.js serverless di
+  `api/chat.js` & `api/models.js`.
+- **InfinityFree / hosting PHP shared lain.** Backend PHP di
+  `api/chat.php` & `api/models.php` (PHP 8+ dengan ekstensi `curl`).
+
+Frontend (HTML/CSS/JS) sama persis untuk keduanya.
 
 ## Fitur
 
@@ -32,18 +37,22 @@ Node.js, tidak butuh database.
 
 ```
 .
-├── index.html              # UI chat
+├── index.html              # UI chat (sama untuk Vercel & PHP)
 ├── assets/
 │   ├── style.css
 │   └── app.js
+├── vercel.json             # routing Vercel (rewrite *.php → handler Node)
 ├── api/
-│   ├── keys.env.example    # template kredensial (commit ke git)
-│   ├── keys.env            # ⬅️ kredensial asli (gitignored, kamu yang buat)
-│   ├── config.example.php  # default non-secret (model list, prompt, dll)
-│   ├── config.php          # opsional override (gitignored)
-│   ├── lib.php             # helper: parse keys.env + load config.php
-│   ├── chat.php            # proxy ke /v1/messages
-│   └── models.php          # daftar model untuk dropdown
+│   ├── _lib.js             # helper Node: load creds + config
+│   ├── chat.js             # ⬅ Vercel handler (Node.js)
+│   ├── models.js           # ⬅ Vercel handler (Node.js)
+│   ├── chat.php            # ⬅ PHP handler (InfinityFree dll.)
+│   ├── models.php          # ⬅ PHP handler
+│   ├── lib.php             # helper PHP
+│   ├── keys.env.example    # template kredensial
+│   ├── keys.env            # kredensial (untuk PHP host) – gitignored
+│   ├── config.example.php  # default non-secret untuk PHP host
+│   └── config.php          # opsional override (gitignored)
 └── README.md
 ```
 
@@ -131,6 +140,66 @@ Petakan ke `keys.env`:
 Hanya kalau kamu mau ubah daftar model, system prompt, max_tokens, atau
 timeout. Salin `api/config.example.php` jadi `api/config.php` dan edit.
 Kalau tidak dibuat, default dari `config.example.php` dipakai.
+
+## Deploy ke Vercel (rekomendasi)
+
+Vercel gratis, cepat, dan tidak punya layer security yang nge-block POST
+seperti InfinityFree. Backend di-handle oleh Node.js serverless function
+(`api/chat.js`, `api/models.js`) yang otomatis ter-detect oleh Vercel.
+
+1. **Push repo ini ke GitHub kamu** (sudah, kalau kamu baca ini).
+
+2. **Login ke Vercel** <https://vercel.com/new> dengan akun GitHub →
+   pilih repo `web` → **Import**.
+
+3. **Set Environment Variables** (Settings → Environment Variables, atau
+   waktu first import). Tambah 4 variabel:
+
+   | Name | Value (contoh EcomAgent) |
+   |---|---|
+   | `API_KEY` | `sk-xxxxxxxxxxxxxxxxxxxx` |
+   | `BASE_URL` | `https://api.ecomagent.in` |
+   | `API_FORMAT` | `openai` |
+   | `AUTH_HEADER` | `bearer` |
+
+   Untuk Anthropic resmi:
+
+   | Name | Value |
+   |---|---|
+   | `API_KEY` | `sk-ant-xxxxxxxxxx` |
+   | `BASE_URL` | `https://api.anthropic.com` |
+   | `API_FORMAT` | `anthropic` |
+   | `AUTH_HEADER` | `x-api-key` |
+
+   Pilih scope **Production, Preview, Development** semuanya.
+
+4. **Deploy**. Vercel akan kasih URL `https://<project>.vercel.app`.
+   Buka, langsung bisa chat.
+
+5. **Ganti API key kapan pun**: Vercel dashboard → Settings →
+   Environment Variables → edit → klik "Redeploy" di tab Deployments
+   (atau push commit baru).
+
+**Catatan keamanan**: dengan environment variable di Vercel, token kamu
+**tidak ter-commit** ke repo publik. Jauh lebih aman daripada hardcode
+di `keys.env`.
+
+`vercel.json` di repo ini sudah set rewrite `/api/chat.php` →
+`/api/chat` dan `/api/models.php` → `/api/models`, jadi kode frontend
+yang masih hit URL `*.php` tetap jalan tanpa diubah.
+
+### Deploy lewat Vercel CLI (alternatif)
+
+```bash
+npm i -g vercel
+vercel login
+vercel            # first deploy → preview
+vercel env add API_KEY production
+vercel env add BASE_URL production
+vercel env add API_FORMAT production
+vercel env add AUTH_HEADER production
+vercel --prod     # deploy ke production URL
+```
 
 ## Deploy ke InfinityFree
 
