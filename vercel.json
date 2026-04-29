@@ -14,7 +14,9 @@
     }
   ],
   "functions": {
-    "api/chat.js":   { "maxDuration": 60 },
-    "api/models.js": { "maxDuration": 10 }
+    "api/chat.js":          { "maxDuration": 60 },
+    "api/models.js":        { "maxDuration": 10 },
+    "api/conversations.js": { "maxDuration": 10 },
+    "api/conversation.js":  { "maxDuration": 10 }
   }
 }

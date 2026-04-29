@@ -1,21 +1,39 @@
-// Vercel serverless function: live-streaming proxy ke Claude API.
-// Mendukung dual format (anthropic-native /v1/messages atau OpenAI-compat
-// /v1/chat/completions) dan selalu stream Server-Sent Events ke client.
+// Vercel serverless function: live-streaming proxy ke Claude API + persist
+// chat history ke Vercel KV.
 //
 // Input (POST):
-//   - application/json     : { model?, messages: [{role, content}, ...] }
+//   - application/json     : {
+//       conversationId: "c_xxx",
+//       message: { content: "string", attachments?: [{kind,name,mime,data}] },
+//       model?: "claude-..."
+//     }
 //   - application/x-www-form-urlencoded : data=<json string di atas>
 //
 // Output: SSE stream
-//   data: {"delta":"...kata..."}\n\n     (banyak, satu per chunk)
-//   data: {"done":true,"model":"...","usage":{...}}\n\n   (terakhir)
-//   data: {"error":"pesan"}\n\n           (kalau gagal di tengah jalan)
+//   data: {"delta":"..."}\n\n
+//   data: {"done":true,"conversationId":"...","model":"...","usage":{...},"title":"..."}\n\n
+//   data: {"error":"pesan"}\n\n
 //
-// Frontend: assets/app.js membaca stream ini dan update DOM kata-per-kata.
+// History flow:
+//   - Server resolves uid via cookie (anonymous, persistent).
+//   - Loads conversation from KV (must belong to uid).
+//   - Appends user message (with attachments) to KV before calling upstream.
+//   - Streams response, accumulating text.
+//   - On completion, appends assistant message to KV.
+//
+// Backwards compat: if body has `messages: [...]` (legacy stateless mode) and
+// no `conversationId`, we create a new conversation automatically.
 
 'use strict';
 
-const { loadCredentials, loadConfig, readBody, jsonError } = require('./_lib');
+const {
+  loadCredentials, loadConfig,
+  readBody,
+  jsonError,
+  ensureUid,
+  getConversation, createConversation, appendMessages,
+  validateAttachments, buildUpstreamMessages, makeTitleFromMessage,
+} = require('./_lib');
 
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
@@ -23,11 +41,8 @@ module.exports = async (req, res) => {
   }
 
   let creds;
-  try {
-    creds = loadCredentials();
-  } catch (e) {
-    return jsonError(res, 500, e.message || String(e));
-  }
+  try { creds = loadCredentials(); }
+  catch (e) { return jsonError(res, 500, e.message || String(e)); }
   const config = loadConfig();
 
   const body = readBody(req);
@@ -35,33 +50,101 @@ module.exports = async (req, res) => {
     return jsonError(res, 400, 'Body harus JSON (atau form-encoded data=<json>).');
   }
 
-  const messagesIn = Array.isArray(body.messages) ? body.messages : null;
-  if (!messagesIn || messagesIn.length === 0) {
-    return jsonError(res, 400, 'Field "messages" wajib dan tidak boleh kosong.');
+  const { uid } = ensureUid(req, res);
+
+  // ---- Resolve / create conversation -----------------------------------
+
+  let conversationId = typeof body.conversationId === 'string' ? body.conversationId : '';
+  let conversation = null;
+
+  if (conversationId) {
+    conversation = await getConversation(conversationId);
+    if (!conversation) return jsonError(res, 404, 'Conversation tidak ditemukan.');
+    if (conversation.ownerUid && conversation.ownerUid !== uid) {
+      return jsonError(res, 403, 'Akses ditolak.');
+    }
   }
 
-  const cleanMessages = [];
-  for (const m of messagesIn) {
-    if (!m || typeof m !== 'object') continue;
-    const role = m.role;
-    const content = m.content;
-    if (role !== 'user' && role !== 'assistant') continue;
-    if (typeof content !== 'string' || content.trim() === '') continue;
-    cleanMessages.push({ role, content });
+  // ---- Resolve incoming user message + attachments ---------------------
+
+  let userMsgText = '';
+  let userAttachments = [];
+
+  if (body.message && typeof body.message === 'object') {
+    userMsgText = String(body.message.content || '').trim();
+    try {
+      userAttachments = validateAttachments(body.message.attachments || []);
+    } catch (e) {
+      return jsonError(res, 400, e.message || String(e));
+    }
+  } else if (Array.isArray(body.messages)) {
+    // Legacy compat: stateless `messages` array (one-shot, no persistence).
+    // Take the last user msg as this turn; the rest become initial context.
+    const arr = body.messages;
+    let last = null;
+    for (let i = arr.length - 1; i >= 0; i--) {
+      if (arr[i] && arr[i].role === 'user') { last = arr[i]; break; }
+    }
+    if (last) userMsgText = String(last.content || '').trim();
   }
-  if (cleanMessages.length === 0) {
-    return jsonError(res, 400, 'Tidak ada pesan valid.');
+
+  if (!userMsgText && userAttachments.length === 0) {
+    return jsonError(res, 400, 'Pesan kosong (tidak ada teks atau attachment).');
   }
+
+  if (!conversation) {
+    // Always create a new conversation. If Vercel KV is not configured,
+    // _lib falls back to in-memory store (works for dev, but persistence
+    // across Vercel cold starts requires real KV setup).
+    conversation = await createConversation(uid, {
+      title: makeTitleFromMessage(userMsgText),
+      model: typeof body.model === 'string' ? body.model : null,
+    });
+    conversationId = conversation.id;
+
+    // Legacy support: caller passed full `messages` array (stateless mode).
+    // Pre-load earlier turns into the new conversation so context is preserved.
+    if (Array.isArray(body.messages) && body.messages.length > 0) {
+      const arr = body.messages
+        .filter(m => m && (m.role === 'user' || m.role === 'assistant'))
+        .slice(0, -1)  // last user msg comes via `userMsgText` below; don't duplicate
+        .map(m => ({ role: m.role, content: String(m.content || '') }));
+      conversation.messages.push(...arr);
+    }
+  }
+
+  // Append user message to in-memory conversation (we'll persist to KV later
+  // alongside the assistant reply so a single SET both creates & finalises
+  // the turn — saves a round-trip).
+  if (userMsgText || userAttachments.length > 0) {
+    conversation.messages.push({
+      role: 'user',
+      content: userMsgText,
+      attachments: userAttachments.length ? userAttachments : undefined,
+      ts: Date.now(),
+    });
+  }
+
+  // ---- Resolve model ---------------------------------------------------
 
   const allowed = config.allowed_models || {};
-  const requestedModel = typeof body.model === 'string' ? body.model : '';
+  const requestedModel = typeof body.model === 'string'
+    ? body.model
+    : (conversation.model || '');
   const model = allowed[requestedModel] ? requestedModel : config.default_model;
 
   const systemPrompt = String(config.system_prompt || '');
   const maxTokens = Number(config.max_tokens || 1024);
 
-  // SSE response setup. Vercel & most reverse proxies disable buffering
-  // when Content-Type is text/event-stream + X-Accel-Buffering: no.
+  // ---- Build upstream messages -----------------------------------------
+
+  const upstreamMsgs = buildUpstreamMessages(conversation.messages, creds.apiFormat);
+  if (upstreamMsgs.length === 0) {
+    return jsonError(res, 400, 'Tidak ada pesan valid untuk dikirim.');
+  }
+
+  // ---- SSE response setup ----------------------------------------------
+
   res.statusCode = 200;
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -69,12 +152,11 @@ module.exports = async (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
   if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
-  function sse(obj) {
-    res.write('data: ' + JSON.stringify(obj) + '\n\n');
-  }
-
-  // Initial comment so client knows headers are flushed.
+  function sse(obj) { res.write('data: ' + JSON.stringify(obj) + '\n\n'); }
   res.write(': stream-start\n\n');
+
+  // Send conversationId early so client can store it before stream ends.
+  if (conversationId) sse({ conversationId });
 
   const ac = new AbortController();
   let aborted = false;
@@ -86,9 +168,7 @@ module.exports = async (req, res) => {
   let usage = null;
 
   try {
-    let url;
-    let headers;
-    let payload;
+    let url, headers, payload;
 
     if (creds.apiFormat === 'openai') {
       url = creds.baseUrl + '/v1/chat/completions';
@@ -99,15 +179,9 @@ module.exports = async (req, res) => {
       };
       const oaMessages = [];
       if (systemPrompt) oaMessages.push({ role: 'system', content: systemPrompt });
-      for (const m of cleanMessages) oaMessages.push(m);
-      payload = {
-        model,
-        messages: oaMessages,
-        max_tokens: maxTokens,
-        stream: true,
-      };
+      for (const m of upstreamMsgs) oaMessages.push(m);
+      payload = { model, messages: oaMessages, max_tokens: maxTokens, stream: true };
     } else {
-      // Anthropic-native streaming.
       url = creds.baseUrl + '/v1/messages';
       headers = {
         'Content-Type': 'application/json',
@@ -119,12 +193,7 @@ module.exports = async (req, res) => {
       } else {
         headers['x-api-key'] = creds.apiKey;
       }
-      payload = {
-        model,
-        max_tokens: maxTokens,
-        messages: cleanMessages,
-        stream: true,
-      };
+      payload = { model, max_tokens: maxTokens, messages: upstreamMsgs, stream: true };
       if (systemPrompt) payload.system = systemPrompt;
     }
 
@@ -181,17 +250,12 @@ module.exports = async (req, res) => {
             sse({ delta: delta.content });
           }
         } else {
-          // Anthropic event types: message_start, content_block_start,
-          // content_block_delta, content_block_stop, message_delta, message_stop, ping
           if (evt.type === 'message_start' && evt.message?.model) {
             modelOut = evt.message.model;
             if (evt.message.usage) usage = evt.message.usage;
           } else if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta') {
             const t = String(evt.delta.text || '');
-            if (t) {
-              totalText += t;
-              sse({ delta: t });
-            }
+            if (t) { totalText += t; sse({ delta: t }); }
           } else if (evt.type === 'message_delta' && evt.usage) {
             usage = { ...(usage || {}), ...evt.usage };
           }
@@ -201,9 +265,57 @@ module.exports = async (req, res) => {
 
     if (!totalText && !aborted) {
       sse({ error: 'Upstream mengembalikan response kosong.' });
-    } else if (!aborted) {
-      sse({ done: true, model: modelOut || model, usage });
+      res.end();
+      return;
     }
+
+    if (aborted) {
+      try { res.end(); } catch (_) { /* socket closed */ }
+      return;
+    }
+
+    // ---- Persist turn to KV --------------------------------------------
+    let savedTitle = conversation.title;
+    if (conversationId) {
+      try {
+        const userMsg = conversation.messages[conversation.messages.length - 1];
+        const newMessages = [];
+        // userMsg already accounted for in conversation.messages above; persist
+        // both user + assistant in one append. But our in-memory convo already
+        // pushed userMsg, so we re-push it to KV via appendMessages. We have
+        // to reload from KV to avoid double-adding.
+        // Simplest: call appendMessages with [userMsg, assistantMsg]. KV cap
+        // logic in appendMessages will handle trimming.
+        if (userMsg && (userMsg.content || (userMsg.attachments && userMsg.attachments.length))) {
+          newMessages.push(userMsg);
+        }
+        newMessages.push({
+          role: 'assistant',
+          content: totalText,
+          ts: Date.now(),
+        });
+        // First message? auto-title from user content.
+        const meta = { model: modelOut || model };
+        const conv = await getConversation(conversationId);
+        if (conv && conv.messages.length === 0) {
+          const titleSrc = userMsg ? userMsg.content : '';
+          if (titleSrc) meta.title = makeTitleFromMessage(titleSrc);
+        }
+        const updated = await appendMessages(uid, conversationId, newMessages, meta);
+        savedTitle = updated.title;
+      } catch (e) {
+        // Don't fail the response on persistence error; just notify.
+        sse({ warning: 'Gagal simpan ke KV: ' + (e.message || String(e)) });
+      }
+    }
+
+    sse({
+      done: true,
+      model: modelOut || model,
+      usage,
+      conversationId: conversationId || null,
+      title: savedTitle,
+    });
     res.end();
   } catch (e) {
     if (!aborted) {
