@@ -271,41 +271,21 @@
 
   function scrollToBottom() {
     requestAnimationFrame(() => {
-      $chat.scrollTo({ top: $chat.scrollHeight, behavior: 'smooth' });
+      window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });
     });
   }
 
   /* ============================================================
-   * Status pill
+   * Typing indicator (simple animated dots)
    * ============================================================ */
-  const PHASES = ['Thinking', 'Deciding next action', 'Working', 'Generating response'];
-
-  function attachStatusPill($msg) {
+  function attachTypingIndicator($msg) {
     const $c = $msg.querySelector('.msg-content');
-    const $pill = document.createElement('div');
-    $pill.className = 'status-pill';
-    $pill.innerHTML = PHASES
-      .map((p, i) => `
-        <div class="status-step${i === 0 ? ' active' : ''}" data-step="${i}">
-          <span class="dot"></span>
-          <span>${escapeHtml(p)}</span>
-        </div>`).join('');
-    $c.appendChild($pill);
-
-    let current = 0;
-    const timer = setInterval(() => {
-      if (current >= PHASES.length - 1) return;
-      const $steps = $pill.querySelectorAll('.status-step');
-      $steps[current].classList.remove('active');
-      $steps[current].classList.add('done');
-      current += 1;
-      $steps[current].classList.add('active');
-      scrollToBottom();
-    }, 1200);
-
+    const $dots = document.createElement('div');
+    $dots.className = 'typing-dots';
+    $dots.innerHTML = '<span class="d"></span><span class="d"></span><span class="d"></span>';
+    $c.appendChild($dots);
     return {
-      stop: () => clearInterval(timer),
-      remove: () => { clearInterval(timer); $pill.remove(); },
+      remove: () => { $dots.remove(); },
     };
   }
 
@@ -534,11 +514,11 @@
 
     appendMessage('user', text, { attachments: sentAttachments });
     const $thinking = appendMessage('assistant', '');
-    const pill = attachStatusPill($thinking);
+    const indicator = attachTypingIndicator($thinking);
 
-    let pillRemoved = false;
+    let indicatorRemoved = false;
     const onDelta = (_chunk, full) => {
-      if (!pillRemoved) { pill.remove(); pillRemoved = true; }
+      if (!indicatorRemoved) { indicator.remove(); indicatorRemoved = true; }
       renderMsgContent($thinking, 'assistant', full);
       scrollToBottom();
     };
@@ -550,7 +530,7 @@
         model: $modelSel.value || undefined,
       }, onDelta);
 
-      if (!pillRemoved) pill.remove();
+      if (!indicatorRemoved) indicator.remove();
       const reply = data.reply || '(kosong)';
       renderMsgContent($thinking, 'assistant', reply);
       appendActions($thinking, 'assistant');
@@ -575,7 +555,7 @@
         loadConversations();
       }
     } catch (e) {
-      if (!pillRemoved) pill.remove();
+      if (!indicatorRemoved) indicator.remove();
       $thinking.classList.add('error');
       renderMsgContent($thinking, 'assistant', '**Error:** ' + e.message);
     } finally {
