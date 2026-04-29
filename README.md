@@ -14,24 +14,33 @@ Frontend (HTML/CSS/JS) sama persis untuk keduanya.
 
 - **UI ala Devin**: pesan minimalis dengan label nama (You / Claude),
   avatar bulat, accent oranye.
-- **Status pill multi-step**: saat menunggu jawaban, ditampilkan tahapan
-  `Thinking → Deciding next action → Working → Generating response`
-  dengan dot animasi (mirip indikator kerja Devin). *Catatan: tahapan
-  ini disimulasikan di frontend karena Claude API non-streaming hanya
-  mengirim 1 response final.*
-- **Multi-turn** dengan history tersimpan di `localStorage` browser.
+- **Status pill multi-step**: tahapan `Thinking → Deciding next action →
+  Working → Generating response` dengan dot animasi.
+- **Streaming response (SSE)** — token muncul real-time saat Claude ngetik.
+- **Multi-conversation** dengan sidebar — list semua chat, rename, delete,
+  buka kembali. Tersimpan di **server (Vercel KV / Upstash Redis)** —
+  bukan di browser, jadi nggak hilang kalau cache di-clear / pindah device.
+- **Anonymous** — gak perlu login. Identity user disimpan di cookie
+  `chatuid` (HttpOnly, 2 tahun).
+- **Image + file attachment**: paperclip button di composer, drag-drop,
+  paste image dari clipboard. Image dikirim sebagai multimodal payload
+  (Vision API). File teks (`.txt`/`.md`/`.json`/source code) inline ke
+  pesan. Limit: 6 file/pesan, 5MB/file, 12MB total.
+- **Code block highlighted**: syntax highlighting via highlight.js
+  (github-dark theme), dengan tombol **Copy code** floating di header
+  tiap block. Bahasa otomatis dari ` ```lang ... ``` `.
+- **Mobile-friendly**: sidebar jadi drawer geser di HP (max-width 800px),
+  composer fixed di bawah, tap target ≥40×40px, font 16px (anti zoom iOS),
+  safe-area-inset support untuk iPhone notch.
 - **Suggested prompts** di empty state — klik = langsung kirim.
-- **Markdown rendering**: heading, bold, italic, list (ordered & unordered),
-  blockquote, link, inline code, dan code block ` ```lang ... ``` `.
-- **Tombol copy** & **regenerate** di tiap pesan Claude (muncul saat hover).
-- **Pilihan model** lewat dropdown (Sonnet, Opus, Haiku, dst).
-- **Dark mode** responsive (HP friendly).
-- **Endpoint flexible**: bisa pakai Anthropic resmi (`x-api-key`) atau
+- **Markdown rendering**: heading, bold, italic, list, blockquote, link,
+  inline code, code block.
+- **Tombol copy** & **regenerate** di tiap pesan Claude.
+- **Pilihan model** lewat dropdown.
+- **Dark mode** dengan accent oranye.
+- **Endpoint flexible**: Anthropic resmi (`x-api-key`) atau OpenAI-compat
   proxy/gateway (`Authorization: Bearer`).
-- **Kredensial dipisah** di file teks `api/keys.env` — gampang diedit
-  pakai Notepad / File Manager tanpa risiko salah tulis PHP.
-- **API key disimpan server-side**, tidak pernah dikirim ke browser, dan
-  tidak akan ke-push ke GitHub.
+- **API key disimpan server-side** (env var Vercel atau `api/keys.env`).
 
 ## Struktur file
 
@@ -152,7 +161,16 @@ seperti InfinityFree. Backend di-handle oleh Node.js serverless function
 2. **Login ke Vercel** <https://vercel.com/new> dengan akun GitHub →
    pilih repo `web` → **Import**.
 
-3. **Set Environment Variables** (Settings → Environment Variables, atau
+3. **(Required untuk history) Tambah Vercel KV / Upstash Redis** —
+   Settings → Storage → **Create Database** → **Upstash for Redis**
+   (atau **KV** kalau opsi itu masih ada) → pilih region terdekat → **Create**
+   → klik **Connect Project** → centang Production+Preview+Development.
+   Vercel auto-inject env var `KV_REST_API_URL` & `KV_REST_API_TOKEN`.
+
+   Tanpa KV, chat tetap jalan tapi history tidak akan persist antar cold
+   start (in-memory fallback).
+
+4. **Set Environment Variables** (Settings → Environment Variables, atau
    waktu first import). Tambah 4 variabel:
 
    | Name | Value (contoh EcomAgent) |
@@ -173,10 +191,11 @@ seperti InfinityFree. Backend di-handle oleh Node.js serverless function
 
    Pilih scope **Production, Preview, Development** semuanya.
 
-4. **Deploy**. Vercel akan kasih URL `https://<project>.vercel.app`.
-   Buka, langsung bisa chat.
+5. **Deploy**. Vercel akan kasih URL `https://<project>.vercel.app`.
+   Buka, langsung bisa chat. Setiap user (anonymous via cookie) bakal
+   punya history sendiri yang tersimpan di Redis.
 
-5. **Ganti API key kapan pun**: Vercel dashboard → Settings →
+6. **Ganti API key kapan pun**: Vercel dashboard → Settings →
    Environment Variables → edit → klik "Redeploy" di tab Deployments
    (atau push commit baru).
 
